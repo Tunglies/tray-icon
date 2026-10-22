@@ -8,12 +8,13 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, AllocAnyThread, DeclaredClass, Message};
 use objc2_app_kit::{
-    NSCellImagePosition, NSEvent, NSImage, NSMenu, NSStatusBar, NSStatusItem, NSTrackingArea,
-    NSTrackingAreaOptions, NSVariableStatusItemLength, NSView, NSWindow,
+    NSBitmapFormat, NSBitmapImageRep, NSCellImagePosition, NSDeviceRGBColorSpace, NSEvent, NSImage,
+    NSMenu, NSStatusBar, NSStatusItem, NSTrackingArea, NSTrackingAreaOptions,
+    NSVariableStatusItemLength, NSView, NSWindow,
 };
 use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGDisplayPixelsHigh, CGMainDisplayID};
-use objc2_foundation::{MainThreadMarker, NSData, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSSize, NSString};
 
 pub(crate) use self::icon::PlatformIcon;
 use crate::Error;
@@ -106,7 +107,12 @@ impl TrayIcon {
     pub fn set_icon(&mut self, icon: Option<Icon>) -> crate::Result<()> {
         if let (Some(ns_status_item), Some(tray_target)) = (&self.ns_status_item, &self.tray_target)
         {
-            set_icon_for_ns_status_item_button(ns_status_item, icon.as_ref(), false, self.mtm)?;
+            set_icon_for_ns_status_item_button(
+                ns_status_item,
+                icon.as_ref(),
+                self.attrs.icon_is_template,
+                self.mtm,
+            )?;
             tray_target.update_dimensions();
         }
         self.attrs.icon = icon;
@@ -191,8 +197,10 @@ impl TrayIcon {
         if let Some(ns_status_item) = &self.ns_status_item {
             let button = ns_status_item.button(self.mtm).unwrap();
             if let Some(nsimage) = button.image() {
-                nsimage.setTemplate(is_template);
-                button.setImage(Some(&nsimage));
+                if nsimage.isTemplate() != is_template {
+                    nsimage.setTemplate(is_template);
+                    button.setImage(Some(&nsimage));
+                }
             }
         }
         self.attrs.icon_is_template = is_template;
@@ -274,17 +282,12 @@ fn set_icon_for_ns_status_item_button(
     let button = ns_status_item.button(mtm).unwrap();
 
     if let Some(icon) = icon {
-        let png_icon = icon.inner.to_png()?;
-
         let (width, height) = icon.inner.get_size();
+
+        let nsimage = nsimage_from_rgba(&icon.inner.0.rgba, width, height);
 
         let icon_height: f64 = 18.0;
         let icon_width: f64 = (width as f64) / (height as f64 / icon_height);
-
-        // build our icon
-        let nsdata = NSData::from_vec(png_icon);
-
-        let nsimage = NSImage::initWithData(NSImage::alloc(), &nsdata).unwrap();
         let new_size = NSSize::new(icon_width, icon_height);
 
         button.setImage(Some(&nsimage));
@@ -297,6 +300,36 @@ fn set_icon_for_ns_status_item_button(
     }
 
     Ok(())
+}
+
+/// `NULL` planes make the rep allocate and own its buffer, so the RGBA
+/// bytes only need to live until the copy below returns.
+fn nsimage_from_rgba(rgba: &[u8], width: u32, height: u32) -> Retained<NSImage> {
+    unsafe {
+        let rep =
+            NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
+                NSBitmapImageRep::alloc(),
+                std::ptr::null_mut(),
+                width as isize,
+                height as isize,
+                8,
+                4,
+                true,
+                false,
+                NSDeviceRGBColorSpace,
+                NSBitmapFormat::AlphaNonpremultiplied,
+                (width as usize * 4) as isize,
+                32,
+            )
+            .unwrap();
+
+        std::ptr::copy_nonoverlapping(rgba.as_ptr(), rep.bitmapData(), rgba.len());
+
+        let image =
+            NSImage::initWithSize(NSImage::alloc(), NSSize::new(width as f64, height as f64));
+        image.addRepresentation(&rep);
+        image
+    }
 }
 
 #[derive(Debug)]
